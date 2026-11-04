@@ -56,4 +56,5 @@ jobs:
 
       - name: Board not updated
         if: steps.plan.outputs.move == 'true' && steps.app.outcome != 'success'
-        run: echo "::warning::Could not get a project token. Give the app the organisation permission 'Projects: read and write'."
+        run: |
+          echo "::warning::Could not get a project token. Give the app the organisation permission Projects (read and write)."
