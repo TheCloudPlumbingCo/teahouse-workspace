@@ -127,7 +127,14 @@ jobs:
       - name: Install the broker's skills
         run: |
           set -euo pipefail
-          curl -fsS "$SESSION/skills" -H "Authorization: Bearer $OIDC" > "$RUNNER_TEMP/skills.json"
+          # The runner's identity token lives only a few minutes, so ask for a new one at every call.
+          oidc() {
+            t=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$(jq -rn --arg v "$BROKER" '$v|@uri')" | jq -r .value)
+            echo "::add-mask::$t" >&2
+            printf %s "$t"
+          }
+          curl -fsS "$SESSION/skills" -H "Authorization: Bearer $(oidc)" > "$RUNNER_TEMP/skills.json"
           jq -c '.[]' "$RUNNER_TEMP/skills.json" | while read -r skill; do
             name=$(echo "$skill" | jq -r .name)
             mkdir -p ".github/skills/$name"
@@ -202,11 +209,18 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
+          # The runner's identity token lives only a few minutes, so ask for a new one at every call.
+          oidc() {
+            t=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$(jq -rn --arg v "$BROKER" '$v|@uri')" | jq -r .value)
+            echo "::add-mask::$t" >&2
+            printf %s "$t"
+          }
           status=$(cat "$RUNNER_TEMP/status" 2>/dev/null || echo fail)
           if [ ! -s "$RUNNER_TEMP/result.md" ]; then
             echo "The research workflow failed before it produced a result. See the run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > "$RUNNER_TEMP/result.md"
           fi
           action=complete; [ "$status" = ok ] || action=fail
           jq -n --rawfile md "$RUNNER_TEMP/result.md" '{markdown:$md}' > "$RUNNER_TEMP/body.json"
-          curl -fsS -X POST "$SESSION/$action" -H "Authorization: Bearer $OIDC" \
+          curl -fsS -X POST "$SESSION/$action" -H "Authorization: Bearer $(oidc)" \
             -H 'content-type: application/json' --data @"$RUNNER_TEMP/body.json"
