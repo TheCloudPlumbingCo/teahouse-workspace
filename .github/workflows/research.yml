@@ -1,0 +1,168 @@
+name: research
+
+# The broker dispatches this when someone comments `@slopcodedev /research --ws <workspace> ...` on an issue.
+# The job researches the workspace's repos, opens a research PR, and reports back to the broker, which posts
+# the comment as the app. Every call to the broker carries this job's GitHub OIDC token.
+on:
+  repository_dispatch:
+    types: [slopcodebot-research]
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+  copilot-requests: write
+
+concurrency:
+  group: research-${{ github.event.client_payload.issueNumber }}
+  cancel-in-progress: false
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BROKER: ${{ github.event.client_payload.brokerOrigin }}
+      DELIVERY: ${{ github.event.client_payload.deliveryId }}
+      WS: ${{ github.event.client_payload.workspace }}
+      TASK: ${{ github.event.client_payload.task }}
+      ISSUE: ${{ github.event.client_payload.issueNumber }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: workspace
+
+      - name: Get a broker token and say we are working
+        run: |
+          set -euo pipefail
+          AUD=$(jq -rn --arg v "$BROKER" '$v|@uri')
+          OIDC=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUD" | jq -r .value)
+          echo "::add-mask::$OIDC"
+          echo "OIDC=$OIDC" >> "$GITHUB_ENV"
+          echo "SESSION=$BROKER/research-session/$(jq -rn --arg v "$DELIVERY" '$v|@uri')" >> "$GITHUB_ENV"
+          curl -fsS -X PUT "$BROKER/research-session/$(jq -rn --arg v "$DELIVERY" '$v|@uri')/activity" \
+            -H "Authorization: Bearer $OIDC" -H 'content-type: application/json' \
+            -d '{"activity":{"_tag":"Working","message":"Researching"}}'
+
+      - name: Check the workspace exists
+        run: |
+          set -uo pipefail
+          problem=""
+          if ! [[ "$WS" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+            problem="\`$WS\` is not a valid workspace id."
+          elif [ ! -f "workspace/workspaces/$WS/workspace.json" ]; then
+            have=$(ls workspace/workspaces | tr '\n' ' ')
+            problem="There is no workspace \`$WS\` in this repository. Available: $have"
+          fi
+          if [ -n "$problem" ]; then
+            echo "$problem" > "$RUNNER_TEMP/result.md"; echo fail > "$RUNNER_TEMP/status"
+            exit 1
+          fi
+
+      - name: Mint a read token for the workspace's repos
+        id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Clone the workspace's repos (read-only, temporary)
+        env:
+          APP_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p repos
+          jq -r '.repos[]' "workspace/workspaces/$WS/workspace.json" | while read -r repo; do
+            git clone --depth 1 "https://x-access-token:${APP_TOKEN}@github.com/${repo}.git" "repos/${repo#*/}"
+            rm -rf "repos/${repo#*/}/.git"
+          done
+          ls repos
+
+      - name: Install the broker's skills
+        run: |
+          set -euo pipefail
+          curl -fsS "$SESSION/skills" -H "Authorization: Bearer $OIDC" > "$RUNNER_TEMP/skills.json"
+          jq -c '.[]' "$RUNNER_TEMP/skills.json" | while read -r skill; do
+            name=$(echo "$skill" | jq -r .name)
+            mkdir -p ".github/skills/$name"
+            {
+              echo '---'
+              echo "name: $name"
+              echo "description: $(echo "$skill" | jq -r .description)"
+              echo '---'
+              echo "$skill" | jq -r .body
+            } > ".github/skills/$name/SKILL.md"
+          done
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run the research
+        run: |
+          set -uo pipefail
+          npm install -g @github/copilot
+          if [ -z "$TASK" ]; then
+            TASK=$(gh issue view "$ISSUE" --repo "$GITHUB_REPOSITORY" --json title,body --jq '"\(.title)\n\n\(.body)"')
+          fi
+          PROMPT="You are doing read-only research for the '$WS' workspace. Its repositories are cloned under ./repos/ (one folder each). Do not modify any file. Reply with markdown only: a one-line answer first, then the evidence as bullets that each cite repo/path:line, then an 'Affected repos' list, then 'Open questions'. Task: ${TASK}"
+          copilot -p "$PROMPT" -s \
+            --allow-tool='shell(cat:*)' --allow-tool='shell(ls:*)' --allow-tool='shell(grep:*)' \
+            --allow-tool='shell(find:*)' > "$RUNNER_TEMP/out.md" 2> "$RUNNER_TEMP/err.log"
+          code=$?
+          if [ $code -ne 0 ] || [ ! -s "$RUNNER_TEMP/out.md" ]; then
+            { echo "Research did not produce output (exit $code). Last lines of the log:"; echo '```'; tail -n 30 "$RUNNER_TEMP/err.log"; echo '```'; } > "$RUNNER_TEMP/result.md"
+            echo fail > "$RUNNER_TEMP/status"
+            exit 1
+          fi
+          cp "$RUNNER_TEMP/out.md" "$RUNNER_TEMP/result.md"
+          echo ok > "$RUNNER_TEMP/status"
+
+      # The organisation does not let the workflow's own token open PRs, so the app opens them.
+      - name: Mint a token that can open pull requests here
+        id: prapp
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-pull-requests: write
+
+      - name: Open the research pull request
+        env:
+          PR_TOKEN: ${{ steps.prapp.outputs.token }}
+        run: |
+          set -euo pipefail
+          cd workspace
+          branch="$WS/research/issue-$ISSUE"
+          file="workspaces/$WS/research/issue-$ISSUE.md"
+          git config user.name "slopcodedev[bot]"
+          git config user.email "344321808+slopcodedev[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          cp "$RUNNER_TEMP/out.md" "$file"
+          git add "$file"
+          git commit -m "research($WS): issue #$ISSUE"
+          git push --force origin "$branch"
+          url=$(GH_TOKEN="$PR_TOKEN" gh pr create --base main --head "$branch" \
+            --title "research($WS): issue #$ISSUE" \
+            --body "Refs #$ISSUE"$'\n\n'"Research written by the agent. Merging this PR approves it." \
+            --label research --label "ws:$WS" 2>/dev/null || GH_TOKEN="$PR_TOKEN" gh pr view "$branch" --json url --jq .url)
+          printf '\n\n---\nResearch PR: %s\n' "$url" >> "$RUNNER_TEMP/result.md"
+
+      - name: Report to the broker
+        if: always()
+        run: |
+          set -uo pipefail
+          status=$(cat "$RUNNER_TEMP/status" 2>/dev/null || echo fail)
+          if [ ! -s "$RUNNER_TEMP/result.md" ]; then
+            echo "The research workflow failed before it produced a result. See the run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > "$RUNNER_TEMP/result.md"
+          fi
+          action=complete; [ "$status" = ok ] || action=fail
+          jq -n --rawfile md "$RUNNER_TEMP/result.md" '{markdown:$md}' > "$RUNNER_TEMP/body.json"
+          curl -fsS -X POST "$SESSION/$action" -H "Authorization: Bearer $OIDC" \
+            -H 'content-type: application/json' --data @"$RUNNER_TEMP/body.json"
