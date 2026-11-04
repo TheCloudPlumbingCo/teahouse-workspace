@@ -1,0 +1,60 @@
+name: board-sync
+
+# When a research or plan pull request is merged, move its issue's card to the next column of the project.
+# Merging is the approval (the branch ruleset asks for one), so no separate review check is needed.
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+
+jobs:
+  move:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Work out the move from the branch name
+        id: plan
+        env:
+          HEAD: ${{ github.event.pull_request.head.ref }}
+        run: |
+          # Branches are named <workspace>/<research|plan>/issue-<number>.
+          if [[ "$HEAD" =~ ^([a-z0-9-]+)/(research|plan)/issue-([0-9]+)$ ]]; then
+            ws="${BASH_REMATCH[1]}"; phase="${BASH_REMATCH[2]}"; issue="${BASH_REMATCH[3]}"
+            [ "$phase" = research ] && status=Planning || status=Implementation
+            project=$(jq -r .project "workspaces/$ws/workspace.json")
+            echo "move=true" >> "$GITHUB_OUTPUT"
+            echo "issue=$issue" >> "$GITHUB_OUTPUT"
+            echo "status=$status" >> "$GITHUB_OUTPUT"
+            echo "project=$project" >> "$GITHUB_OUTPUT"
+          else
+            echo "Not a research or plan branch ($HEAD); nothing to move."
+          fi
+
+      - name: Mint a token for the project board
+        id: app
+        if: steps.plan.outputs.move == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-organization-projects: write
+          permission-issues: read
+
+      - name: Move the card
+        if: steps.plan.outputs.move == 'true' && steps.app.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: bash .github/scripts/move-card.sh "${{ steps.plan.outputs.issue }}" "${{ steps.plan.outputs.status }}" "${{ steps.plan.outputs.project }}"
+
+      - name: Board not updated
+        if: steps.plan.outputs.move == 'true' && steps.app.outcome != 'success'
+        run: |
+          echo "::warning::Could not get a project token. Give the app the organisation permission Projects (read and write)."
