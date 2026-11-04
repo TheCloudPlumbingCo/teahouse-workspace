@@ -10,8 +10,8 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
   id-token: write
-  copilot-requests: write
 
 concurrency:
   group: research-${{ github.event.client_payload.issueNumber }}
@@ -61,6 +61,48 @@ jobs:
             exit 1
           fi
 
+      # Research runs as the person who asked, on their own Copilot seat. Nothing is stored: the code below is
+      # single-use, and the token lives only for this run.
+      - name: Sign in to Copilot as the person who asked (device flow)
+        env:
+          CLIENT_ID: ${{ vars.APP_CLIENT_ID }}
+        run: |
+          set +e
+          fail() { echo "$1" > "$RUNNER_TEMP/result.md"; echo fail > "$RUNNER_TEMP/status"; exit 1; }
+          comment="repos/$GITHUB_REPOSITORY/issues/comments"
+          resp=$(curl -sS -X POST https://github.com/login/device/code -H 'accept: application/json' -d "client_id=$CLIENT_ID")
+          user_code=$(jq -r '.user_code // empty' <<<"$resp")
+          device=$(jq -r '.device_code // empty' <<<"$resp")
+          [ -n "$user_code" ] || fail "Could not start the sign-in: $(jq -r '.error_description // .error // "no answer"' <<<"$resp")"
+          echo "::add-mask::$device"
+          uri=$(jq -r .verification_uri <<<"$resp")
+          interval=$(jq -r '.interval // 5' <<<"$resp")
+          cid=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE/comments" --jq .id -f body="**Sign in to start the research.** Open $uri and enter the code \`$user_code\`. It is valid for 8 minutes. The research runs as you and uses your Copilot seat.")
+          deadline=$((SECONDS + 480))
+          token=""
+          while [ $SECONDS -lt $deadline ]; do
+            sleep "$interval"
+            r=$(curl -sS -X POST https://github.com/login/oauth/access_token -H 'accept: application/json' \
+              -d "client_id=$CLIENT_ID" -d "device_code=$device" -d 'grant_type=urn:ietf:params:oauth:grant-type:device_code')
+            token=$(jq -r '.access_token // empty' <<<"$r")
+            [ -n "$token" ] && break
+            err=$(jq -r '.error // empty' <<<"$r")
+            case "$err" in
+              authorization_pending) ;;
+              slow_down) interval=$((interval + 5)) ;;
+              *) gh api -X PATCH "$comment/$cid" -f body="Sign-in stopped ($err). Comment the command again to retry." >/dev/null
+                 fail "Sign-in stopped ($err)." ;;
+            esac
+          done
+          if [ -z "$token" ]; then
+            gh api -X PATCH "$comment/$cid" -f body="Nobody signed in within 8 minutes. Comment the command again to retry." >/dev/null
+            fail "Nobody signed in within 8 minutes, so the research did not start. Comment the command again to retry."
+          fi
+          echo "::add-mask::$token"
+          echo "COPILOT_GITHUB_TOKEN=$token" >> "$GITHUB_ENV"
+          login=$(curl -sS -H "Authorization: Bearer $token" https://api.github.com/user | jq -r '.login // "someone"')
+          gh api -X PATCH "$comment/$cid" -f body="Signed in as @$login. Researching..." >/dev/null
+
       - name: Mint a read token for the workspace's repos
         id: app
         uses: actions/create-github-app-token@v1
@@ -103,8 +145,6 @@ jobs:
           node-version: 22
 
       - name: Run the research
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           # The runner starts bash with -e, which would end the step the moment copilot fails and lose its error.
           set +e
