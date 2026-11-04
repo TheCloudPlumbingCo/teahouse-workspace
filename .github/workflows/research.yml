@@ -19,7 +19,6 @@ concurrency:
 jobs:
   research:
     runs-on: ubuntu-latest
-    environment: copilot-research
     timeout-minutes: 20
     env:
       BROKER: ${{ github.event.client_payload.brokerOrigin }}
@@ -117,7 +116,7 @@ jobs:
           set +e
           set -uo pipefail
           if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
-            echo "The Copilot token is not set up: add the secret COPILOT_GITHUB_TOKEN to the copilot-research environment of this repository." > "$RUNNER_TEMP/result.md"
+            echo "The Copilot token is not set up: add the repository secret COPILOT_GITHUB_TOKEN." > "$RUNNER_TEMP/result.md"
             echo fail > "$RUNNER_TEMP/status"
             exit 1
           fi
