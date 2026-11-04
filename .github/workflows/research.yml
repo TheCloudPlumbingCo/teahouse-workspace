@@ -122,7 +122,20 @@ jobs:
           cp "$RUNNER_TEMP/out.md" "$RUNNER_TEMP/result.md"
           echo ok > "$RUNNER_TEMP/status"
 
+      # The organisation does not let the workflow's own token open PRs, so the app opens them.
+      - name: Mint a token that can open pull requests here
+        id: prapp
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-pull-requests: write
+
       - name: Open the research pull request
+        env:
+          PR_TOKEN: ${{ steps.prapp.outputs.token }}
         run: |
           set -euo pipefail
           cd workspace
@@ -135,10 +148,10 @@ jobs:
           git add "$file"
           git commit -m "research($WS): issue #$ISSUE"
           git push --force origin "$branch"
-          url=$(gh pr create --base main --head "$branch" \
+          url=$(GH_TOKEN="$PR_TOKEN" gh pr create --base main --head "$branch" \
             --title "research($WS): issue #$ISSUE" \
             --body "Refs #$ISSUE"$'\n\n'"Research written by the agent. Merging this PR approves it." \
-            --label research --label "ws:$WS" 2>/dev/null || gh pr view "$branch" --json url --jq .url)
+            --label research --label "ws:$WS" 2>/dev/null || GH_TOKEN="$PR_TOKEN" gh pr view "$branch" --json url --jq .url)
           printf '\n\n---\nResearch PR: %s\n' "$url" >> "$RUNNER_TEMP/result.md"
 
       - name: Report to the broker
