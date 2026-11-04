@@ -1,0 +1,25 @@
+name: Task
+description: A piece of work to research, plan and implement
+labels: ["task"]
+body:
+  - type: dropdown
+    id: workspace
+    attributes:
+      label: Workspace
+      options: ["be", "ops"]
+    validations: { required: true }
+  - type: input
+    id: key
+    attributes:
+      label: Jira key (optional)
+      placeholder: TEA-123
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should be true when this is done?
+    validations: { required: true }
+  - type: textarea
+    id: repos
+    attributes:
+      label: Repos likely affected

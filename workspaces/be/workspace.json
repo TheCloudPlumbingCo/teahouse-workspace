@@ -1,0 +1,10 @@
+{
+  "name": "be",
+  "repos": [
+    "TheCloudPlumbingCo/teahouse-core",
+    "TheCloudPlumbingCo/teahouse-water-service",
+    "TheCloudPlumbingCo/teahouse-tealeaf-service",
+    "TheCloudPlumbingCo/teahouse-tea-service"
+  ],
+  "project": 1
+}

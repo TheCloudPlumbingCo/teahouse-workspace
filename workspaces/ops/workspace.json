@@ -1,0 +1,8 @@
+{
+  "name": "ops",
+  "repos": [
+    "TheCloudPlumbingCo/teahouse-env",
+    "TheCloudPlumbingCo/teahouse-load-gen"
+  ],
+  "project": 1
+}
