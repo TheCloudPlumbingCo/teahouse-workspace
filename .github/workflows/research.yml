@@ -60,6 +60,24 @@ jobs:
             exit 1
           fi
 
+      - name: Mint a token for the project board
+        id: board
+        continue-on-error: true
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-organization-projects: write
+          permission-issues: read
+
+      - name: Move the card to Research
+        if: steps.board.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.board.outputs.token }}
+        run: bash workspace/.github/scripts/move-card.sh "$ISSUE" Research "$(jq -r .project "workspace/workspaces/$WS/workspace.json")"
+
       - name: Mint a read token for the workspace's repos
         id: app
         uses: actions/create-github-app-token@v1
