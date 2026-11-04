@@ -10,7 +10,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: write
   id-token: write
 
 concurrency:
@@ -20,6 +19,7 @@ concurrency:
 jobs:
   research:
     runs-on: ubuntu-latest
+    environment: copilot-research
     timeout-minutes: 20
     env:
       BROKER: ${{ github.event.client_payload.brokerOrigin }}
@@ -60,48 +60,6 @@ jobs:
             echo "$problem" > "$RUNNER_TEMP/result.md"; echo fail > "$RUNNER_TEMP/status"
             exit 1
           fi
-
-      # Research runs as the person who asked, on their own Copilot seat. Nothing is stored: the code below is
-      # single-use, and the token lives only for this run.
-      - name: Sign in to Copilot as the person who asked (device flow)
-        env:
-          CLIENT_ID: ${{ vars.APP_CLIENT_ID }}
-        run: |
-          set +e
-          fail() { echo "$1" > "$RUNNER_TEMP/result.md"; echo fail > "$RUNNER_TEMP/status"; exit 1; }
-          comment="repos/$GITHUB_REPOSITORY/issues/comments"
-          resp=$(curl -sS -X POST https://github.com/login/device/code -H 'accept: application/json' -d "client_id=$CLIENT_ID")
-          user_code=$(jq -r '.user_code // empty' <<<"$resp")
-          device=$(jq -r '.device_code // empty' <<<"$resp")
-          [ -n "$user_code" ] || fail "Could not start the sign-in: $(jq -r '.error_description // .error // "no answer"' <<<"$resp")"
-          echo "::add-mask::$device"
-          uri=$(jq -r .verification_uri <<<"$resp")
-          interval=$(jq -r '.interval // 5' <<<"$resp")
-          cid=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE/comments" --jq .id -f body="**Sign in to start the research.** Open $uri and enter the code \`$user_code\`. It is valid for 8 minutes. The research runs as you and uses your Copilot seat.")
-          deadline=$((SECONDS + 480))
-          token=""
-          while [ $SECONDS -lt $deadline ]; do
-            sleep "$interval"
-            r=$(curl -sS -X POST https://github.com/login/oauth/access_token -H 'accept: application/json' \
-              -d "client_id=$CLIENT_ID" -d "device_code=$device" -d 'grant_type=urn:ietf:params:oauth:grant-type:device_code')
-            token=$(jq -r '.access_token // empty' <<<"$r")
-            [ -n "$token" ] && break
-            err=$(jq -r '.error // empty' <<<"$r")
-            case "$err" in
-              authorization_pending) ;;
-              slow_down) interval=$((interval + 5)) ;;
-              *) gh api -X PATCH "$comment/$cid" -f body="Sign-in stopped ($err). Comment the command again to retry." >/dev/null
-                 fail "Sign-in stopped ($err)." ;;
-            esac
-          done
-          if [ -z "$token" ]; then
-            gh api -X PATCH "$comment/$cid" -f body="Nobody signed in within 8 minutes. Comment the command again to retry." >/dev/null
-            fail "Nobody signed in within 8 minutes, so the research did not start. Comment the command again to retry."
-          fi
-          echo "::add-mask::$token"
-          echo "COPILOT_GITHUB_TOKEN=$token" >> "$GITHUB_ENV"
-          login=$(curl -sS -H "Authorization: Bearer $token" https://api.github.com/user | jq -r '.login // "someone"')
-          gh api -X PATCH "$comment/$cid" -f body="Signed in as @$login. Researching..." >/dev/null
 
       - name: Mint a read token for the workspace's repos
         id: app
@@ -152,21 +110,33 @@ jobs:
           node-version: 22
 
       - name: Run the research
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
         run: |
           # The runner starts bash with -e, which would end the step the moment copilot fails and lose its error.
           set +e
           set -uo pipefail
+          if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
+            echo "The Copilot token is not set up: add the secret COPILOT_GITHUB_TOKEN to the copilot-research environment of this repository." > "$RUNNER_TEMP/result.md"
+            echo fail > "$RUNNER_TEMP/status"
+            exit 1
+          fi
           npm install -g @github/copilot
           if [ -z "$TASK" ]; then
             TASK=$(gh issue view "$ISSUE" --repo "$GITHUB_REPOSITORY" --json title,body --jq '"\(.title)\n\n\(.body)"')
           fi
           PROMPT="You are doing read-only research for the '$WS' workspace. Its repositories are cloned under ./repos/ (one folder each). Do not modify any file. Reply with markdown only: a one-line answer first, then the evidence as bullets that each cite repo/path:line, then an 'Affected repos' list, then 'Open questions'. Task: ${TASK}"
-          copilot -p "$PROMPT" -s \
+          copilot -p "$PROMPT" -s --no-ask-user \
             --allow-tool='shell(cat:*)' --allow-tool='shell(ls:*)' --allow-tool='shell(grep:*)' \
             --allow-tool='shell(find:*)' > "$RUNNER_TEMP/out.md" 2> "$RUNNER_TEMP/err.log"
           code=$?
           if [ $code -ne 0 ] || [ ! -s "$RUNNER_TEMP/out.md" ]; then
             { echo "Research did not produce output (exit $code). Last lines of the log:"; echo '```'; tail -n 30 "$RUNNER_TEMP/err.log"; echo '```'; } > "$RUNNER_TEMP/result.md"
+            echo fail > "$RUNNER_TEMP/status"
+            exit 1
+          fi
+          if grep -qE '(github_pat_|ghp_|ghu_|gho_|ghs_|ghr_)[A-Za-z0-9_]{20,}' "$RUNNER_TEMP/out.md" || grep -qF "$COPILOT_GITHUB_TOKEN" "$RUNNER_TEMP/out.md"; then
+            echo "The research output was withheld because it contained something that looks like an access token." > "$RUNNER_TEMP/result.md"
             echo fail > "$RUNNER_TEMP/status"
             exit 1
           fi
