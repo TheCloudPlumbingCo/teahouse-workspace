@@ -103,7 +103,11 @@ jobs:
           node-version: 22
 
       - name: Run the research
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
+          # The runner starts bash with -e, which would end the step the moment copilot fails and lose its error.
+          set +e
           set -uo pipefail
           npm install -g @github/copilot
           if [ -z "$TASK" ]; then
