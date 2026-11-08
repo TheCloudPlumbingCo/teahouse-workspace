@@ -7,6 +7,7 @@ on:
 permissions:
   contents: write
   issues: read
+  id-token: write   # lets the last step prove its identity to the broker
 jobs:
   run:
     uses: TheCloudPlumbingCo/slop-factory-pieces/.github/workflows/workspace.yml@main
