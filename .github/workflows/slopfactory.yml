@@ -1,0 +1,15 @@
+# One file for every slop factory phase (research, design, outline, ...). The command is in the payload.
+# slopfactory-run is the new event. slopcodebot-research is the old broker event; it means research.
+name: slop factory
+on:
+  repository_dispatch:
+    types: [slopfactory-run, slopcodebot-research]
+permissions:
+  contents: write
+  issues: read
+jobs:
+  run:
+    uses: TheCloudPlumbingCo/slop-factory-pieces/.github/workflows/workspace.yml@main
+    with:
+      model: claude-haiku-5.5   # light model for tests; remove this line to use the CLI default
+    secrets: inherit
