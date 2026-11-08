@@ -1,0 +1,16 @@
+# TEST caller for the reusable slop factory workflow. It uses its own event type, so it does not fire with research.yml.
+# Start it with: gh api repos/TheCloudPlumbingCo/teahouse-workspace/dispatches -f event_type=slopfactory-test \
+#   -F 'client_payload[workspace]=be' -F 'client_payload[issueNumber]=2' -f 'client_payload[task]=...'
+name: slop factory test
+on:
+  repository_dispatch:
+    types: [slopfactory-test]
+permissions:
+  contents: write
+  issues: read
+jobs:
+  run:
+    uses: TheCloudPlumbingCo/slop-factory-pieces/.github/workflows/workspace.yml@rpi-workflow-action
+    with:
+      model: claude-haiku-5.5
+    secrets: inherit
